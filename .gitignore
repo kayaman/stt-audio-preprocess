@@ -61,3 +61,7 @@ local.settings.json
 tmp/
 temp/
 *.tmp
+
+# Helm
+*.tgz
+

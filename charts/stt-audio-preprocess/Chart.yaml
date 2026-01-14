@@ -1,0 +1,20 @@
+apiVersion: v2
+name: stt-audio-preprocess
+description: State-of-the-art audio preprocessing service for Speech-to-Text
+type: application
+version: 1.0.0
+appVersion: 2.0.0
+home: https://github.com/kayaman/stt-audio-preprocess
+sources:
+  - https://github.com/kayaman/stt-audio-preprocess
+keywords:
+  - audio
+  - preprocessing
+  - speech-to-text
+  - stt
+  - whisper
+  - azure-speech
+  - ffmpeg
+maintainers:
+  - name: kayaman
+    url: https://github.com/kayaman
