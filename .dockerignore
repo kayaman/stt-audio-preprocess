@@ -1,0 +1,63 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.docker
+
+# Environment files
+.env
+.env.*
+*.env
+
+# Python cache
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+dist
+build
+.eggs
+
+# Virtual environments
+.venv
+venv
+ENV
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.nox
+tests
+
+# Documentation
+*.md
+docs
+
+# Deployment scripts (not needed in image)
+deploy
+
+# Logs
+*.log
+logs
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large model files (download at runtime)
+*.onnx
+*.pt
+*.pth
