@@ -33,17 +33,6 @@ service:
   type: ClusterIP
   port: 8080
 
-ingress:
-  enabled: false
-  className: ''
-  annotations: {}
-  hosts:
-    - host: stt-audio-preprocess.local
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
-
 resources:
   limits:
     cpu: 2000m
@@ -81,7 +70,9 @@ autoscaling:
 
 podDisruptionBudget:
   enabled: false
+  # Only one of minAvailable or maxUnavailable should be set (they are mutually exclusive)
   minAvailable: 1
+  # maxUnavailable: 1
 
 persistence:
   enabled: false
