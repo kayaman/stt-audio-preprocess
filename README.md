@@ -1,17 +1,6 @@
-# Audio Preprocessing Service (Containerized)
+# Audio Preprocessing Service
 
 A high-performance, containerized service for preprocessing audio files before speech-to-text (STT) processing. Optimized for Whisper and similar services.
-
-## Why Containerized?
-
-| Feature | Azure Functions | Container Apps |
-|---------|-----------------|----------------|
-| FFmpeg support | Requires custom image | ✅ Native |
-| System libraries | Limited | ✅ Full control |
-| Cold starts | Can be slow | ✅ Faster with min replicas |
-| Scaling | Event-driven | ✅ Event-driven (KEDA) |
-| Cost | Consumption billing | ✅ Scale to zero |
-| Complexity | Simple for small scale | Better for production |
 
 ## Features
 
@@ -42,25 +31,25 @@ A high-performance, containerized service for preprocessing audio files before s
 ## Architecture
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Blob Storage   │────▶│  Event Grid     │────▶│  Storage Queue  │
-│  (audio-input)  │     │  Subscription   │     │                 │
-└─────────────────┘     └─────────────────┘     └────────┬────────┘
-                                                         │
-                                                         ▼
-                                               ┌─────────────────┐
-                                               │  Container App  │
-                                               │  ┌───────────┐  │
-                                               │  │  FastAPI  │  │
-                                               │  │  + Worker │  │
-                                               │  └───────────┘  │
-                                               └────────┬────────┘
-                                                        │
-                                                        ▼
-                                               ┌─────────────────┐
-                                               │  Blob Storage   │
-                                               │  (audio-output) │
-                                               └─────────────────┘
+┌─────────────┐
+│   Client    │
+│ (cURL/API)  │
+└──────┬──────┘
+       │ POST /process (audio binary)
+       │
+       ▼
+┌─────────────────┐
+│  FastAPI App    │
+│ ┌─────────────┐ │
+│ │  Audio      │ │
+│ │  Processor  │ │
+│ └─────────────┘ │
+└────────┬────────┘
+         │
+         ▼ Returns processed WAV
+    ┌─────────┐
+    │ Client  │
+    └─────────┘
 ```
 
 ## Quick Start
@@ -68,33 +57,188 @@ A high-performance, containerized service for preprocessing audio files before s
 ### Local Development
 
 ```bash
-# Clone and start
+# Clone the repository
 git clone <repo>
-cd audio-preprocess-container
+cd stt-audio-preprocess
 
-# Start with Docker Compose (includes Azurite)
+# Start with Docker Compose
 docker compose up --build
 
-# Wait for setup, then upload a test file
+# Process an audio file
 curl -X POST "http://localhost:8080/process" \
-  -H "Content-Type: application/json" \
-  -d '{"container": "audio-input", "blob_name": "incoming/test.wav"}'
+  -F "file=@test_audio.mp3" \
+  -o processed.wav
+
+# Or with raw binary
+curl -X POST "http://localhost:8080/process" \
+  -H "Content-Type: audio/mpeg" \
+  --data-binary "@test_audio.mp3" \
+  -o processed.wav
 ```
 
-### Deploy to Azure Container Apps
+### Running Locally (Python)
 
 ```bash
-# Set your configuration
-export RESOURCE_GROUP=rg-audio-preprocess
-export STORAGE_ACCOUNT=staudiopreprocess
-export ACR_NAME=acraudiopreprocess
+# Install dependencies
+pip install -r requirements.txt
 
-# Deploy
-chmod +x deploy/deploy.sh
-./deploy/deploy.sh production
+# Set environment variables (optional)
+export VAD_ENABLED=true
+export NOISE_ENABLED=false
 
-# Set up Event Grid triggers
-./deploy/setup-eventgrid.sh $RESOURCE_GROUP $STORAGE_ACCOUNT
+# Run the service
+python -m src.main
+
+# Or with uvicorn directly
+uvicorn src.main:api_app --host 0.0.0.0 --port 8080
+```
+
+## API Reference
+
+### POST /process
+
+Process an audio file and return the normalized WAV.
+
+**Request:**
+- **Method:** `POST`
+- **Content-Type:** `multipart/form-data` (with file upload) OR `audio/*` (raw binary)
+- **Body:** Audio file as binary data
+
+**Response:**
+- **Content-Type:** `audio/wav`
+- **Body:** Processed 16-bit PCM WAV file
+
+**Headers (response):**
+- `X-Processing-Duration-Ms`: Processing time in milliseconds
+- `X-Original-Duration-Ms`: Original audio duration
+- `X-Final-Duration-Ms`: Final audio duration after processing
+- `X-Compression-Ratio`: Ratio of silence removed (0.0-1.0)
+
+**Example with multipart/form-data:**
+```bash
+curl -X POST "http://localhost:8080/process" \
+  -F "file=@input.mp3" \
+  -o output.wav
+```
+
+**Example with raw binary:**
+```bash
+curl -X POST "http://localhost:8080/process" \
+  -H "Content-Type: audio/mpeg" \
+  --data-binary "@input.mp3" \
+  -o output.wav
+```
+
+**Example with Python:**
+```python
+import requests
+
+with open("input.mp3", "rb") as f:
+    response = requests.post(
+        "http://localhost:8080/process",
+        files={"file": f}
+    )
+
+with open("output.wav", "wb") as f:
+    f.write(response.content)
+```
+
+### GET /health
+
+Health check endpoint.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-01-01T12:00:00Z",
+  "version": "2.0.0",
+  "environment": "production",
+  "config": {
+    "vad_enabled": true,
+    "noise_reduction_enabled": false,
+    "target_sample_rate": 16000
+  }
+}
+```
+
+### GET /ready
+
+Readiness check endpoint. Always returns ready since there are no external dependencies.
+
+**Response:**
+```json
+{
+  "status": "ready"
+}
+```
+
+### GET /metrics
+
+Prometheus metrics endpoint.
+
+**Example metrics:**
+```
+# Total files processed
+audio_files_processed_total{status="success"} 1234
+audio_files_processed_total{status="error"} 5
+
+# Processing duration histogram
+audio_processing_duration_seconds_bucket{le="10"} 1200
+audio_processing_duration_seconds_bucket{le="30"} 1230
+
+# Compression ratio
+audio_compression_ratio_bucket{le="0.5"} 800
+```
+
+### GET /stats
+
+Get processing statistics.
+
+**Response:**
+```json
+{
+  "processed_count": 1234,
+  "error_count": 5,
+  "success_rate": 0.996,
+  "uptime_seconds": 86400.0
+}
+```
+
+### GET /config
+
+Get current configuration.
+
+**Response:**
+```json
+{
+  "app_name": "audio-preprocess",
+  "app_version": "2.0.0",
+  "environment": "production",
+  "audio": {
+    "target_sample_rate": 16000,
+    "target_channels": 1,
+    "supported_extensions": [".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"]
+  },
+  "vad": {
+    "enabled": true,
+    "threshold": 0.5,
+    "min_speech_duration_ms": 250
+  },
+  "silence": {
+    "enabled": true,
+    "max_gap_ms": 600,
+    "keep_ms": 150
+  },
+  "noise": {
+    "enabled": false,
+    "stationary": true
+  },
+  "normalize": {
+    "enabled": true,
+    "target_dbfs": -20.0
+  }
+}
 ```
 
 ## Configuration
@@ -107,121 +251,89 @@ Key settings:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROCESSING_MODE` | `queue` | `queue`, `polling`, or `manual` |
+| `AUDIO_TARGET_SAMPLE_RATE` | `16000` | Output sample rate in Hz |
+| `AUDIO_TARGET_CHANNELS` | `1` | Output channels (1=mono) |
 | `VAD_ENABLED` | `true` | Enable Silero VAD |
-| `VAD_THRESHOLD` | `0.5` | Speech probability threshold |
+| `VAD_THRESHOLD` | `0.5` | Speech probability threshold (0.0-1.0) |
 | `NOISE_ENABLED` | `false` | Enable spectral noise reduction |
 | `SILENCE_ENABLED` | `true` | Enable silence compression |
 | `SILENCE_MAX_GAP_MS` | `600` | Compress gaps longer than this |
+| `SILENCE_KEEP_MS` | `150` | Silence to keep after compression |
+| `NORMALIZE_ENABLED` | `true` | Enable audio normalization |
+| `NORMALIZE_TARGET_DBFS` | `-20.0` | Target loudness in dBFS |
 
-### Processing Modes
+## Deployment
 
-**Queue Mode (Recommended)**
-- Event-driven via Azure Storage Queue
-- Events from Event Grid blob triggers
-- Best for production at scale
-
-**Polling Mode**
-- Periodically scans input container
-- Simpler setup, no Event Grid needed
-- Good for development/testing
-
-**Manual Mode**
-- API-only, no background processing
-- Use for testing or on-demand processing
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/ready` | GET | Readiness check |
-| `/metrics` | GET | Prometheus metrics |
-| `/stats` | GET | Processing statistics |
-| `/process` | POST | Process single blob |
-| `/process/batch` | POST | Process multiple blobs |
-| `/blobs` | GET | List input blobs |
-| `/config` | GET | View configuration |
-
-### Example: Process a file
+### Docker
 
 ```bash
-curl -X POST "https://your-service.azurecontainerapps.io/process" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "container": "audio-input",
-    "blob_name": "incoming/call_123.mp3"
-  }'
+# Build the image
+docker build -t audio-preprocess .
+
+# Run the container
+docker run -p 8080:8080 \
+  -e VAD_ENABLED=true \
+  -e NOISE_ENABLED=false \
+  audio-preprocess
 ```
 
-Response:
-```json
-{
-  "success": true,
-  "input_path": "audio-input/incoming/call_123.mp3",
-  "output_path": "audio-output/processed/call_123.wav",
-  "stats": {
-    "original_duration_ms": 180000,
-    "final_duration_ms": 145000,
-    "speech_segments": 42,
-    "silence_removed_ms": 35000,
-    "compression_ratio": 0.194
-  },
-  "duration_seconds": 12.5
-}
-```
-
-## Scaling
-
-### Azure Container Apps Scaling Rules
-
-The default deployment scales based on queue length:
+### Kubernetes
 
 ```yaml
-scale:
-  minReplicas: 0      # Scale to zero when idle
-  maxReplicas: 10     # Maximum instances
-  rules:
-    - name: queue-scaling
-      azureQueue:
-        queueName: audio-processing-queue
-        queueLength: 10  # Messages per instance
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audio-preprocess
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: audio-preprocess
+  template:
+    metadata:
+      labels:
+        app: audio-preprocess
+    spec:
+      containers:
+      - name: audio-preprocess
+        image: your-registry/audio-preprocess:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: VAD_ENABLED
+          value: "true"
+        - name: SILENCE_ENABLED
+          value: "true"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ```
 
-### Recommended Resources
+## Performance
 
-| Workload | CPU | Memory | Max Replicas |
-|----------|-----|--------|--------------|
-| Light (<1k/day) | 0.5 | 1Gi | 3 |
-| Medium (1k-10k/day) | 1.0 | 2Gi | 5 |
-| Heavy (10k+/day) | 2.0 | 4Gi | 10+ |
+Benchmarks (1 CPU, 2GB RAM):
 
-## Monitoring
-
-### Prometheus Metrics
-
-```
-# Total files processed
-audio_files_processed_total{status="success"}
-audio_files_processed_total{status="error"}
-
-# Processing duration histogram
-audio_processing_duration_seconds_bucket{le="10"}
-audio_processing_duration_seconds_bucket{le="30"}
-
-# Compression ratio
-audio_compression_ratio_bucket{le="0.5"}
-```
-
-### Health Checks
-
-```bash
-# Liveness
-curl https://your-service/health
-
-# Readiness (checks Azure Storage connectivity)
-curl https://your-service/ready
-```
+| Audio Duration | Processing Time | Compression |
+|----------------|-----------------|-------------|
+| 1 minute | 2-4 seconds | 30-50% |
+| 10 minutes | 15-30 seconds | 25-45% |
+| 1 hour | 2-4 minutes | 20-40% |
 
 ## Troubleshooting
 
@@ -235,10 +347,9 @@ curl https://your-service/ready
 - Ensure `silero-vad` and `onnxruntime` are installed
 - Check internet access for model download on first run
 
-**"Queue messages not processing"**
-- Verify Event Grid subscription is active
-- Check queue name matches configuration
-- Ensure storage connection string is correct
+**"File too large"**
+- Increase `PROCESSING_MAX_FILE_SIZE_MB` environment variable
+- Default is 500MB
 
 ### Debug Mode
 
@@ -247,16 +358,6 @@ Enable detailed logging:
 DEBUG=true
 SERVER_LOG_LEVEL=debug
 ```
-
-## Performance
-
-Benchmarks on Azure Container Apps (1 CPU, 2GB RAM):
-
-| Audio Duration | Processing Time | Compression |
-|----------------|-----------------|-------------|
-| 1 minute | 2-4 seconds | 30-50% |
-| 10 minutes | 15-30 seconds | 25-45% |
-| 1 hour | 2-4 minutes | 20-40% |
 
 ## License
 

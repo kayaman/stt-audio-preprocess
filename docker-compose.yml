@@ -5,10 +5,6 @@
 # Usage:
 #   docker compose up --build
 #
-# Includes:
-#   - Audio preprocessing service
-#   - Azurite (Azure Storage Emulator)
-#
 # =============================================================================
 
 services:
@@ -24,19 +20,6 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Azure Storage (using Azurite)
-      - AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10001/devstoreaccount1;
-      - AZURE_CONTAINER_INPUT=audio-input
-      - AZURE_FOLDER_INPUT=incoming
-      - AZURE_CONTAINER_OUTPUT=audio-output
-      - AZURE_FOLDER_OUTPUT=processed
-      - AZURE_QUEUE_NAME=audio-processing-queue
-      - AZURE_DELETE_SOURCE=false
-      
-      # Processing mode
-      - PROCESSING_MODE=polling  # Use polling for local dev
-      - POLLING_INTERVAL_SECONDS=5
-      
       # Audio settings
       - AUDIO_TARGET_SAMPLE_RATE=16000
       - AUDIO_TARGET_CHANNELS=1
@@ -66,9 +49,6 @@ services:
       - APP_NAME=audio-preprocess-dev
       - ENVIRONMENT=development
       - DEBUG=true
-    depends_on:
-      azurite:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -79,58 +59,6 @@ services:
       # Mount source for hot-reload during development
       - ./src:/app/src:ro
     restart: unless-stopped
-
-  # ---------------------------------------------------------------------------
-  # Azurite - Azure Storage Emulator
-  # ---------------------------------------------------------------------------
-  azurite:
-    image: mcr.microsoft.com/azure-storage/azurite:latest
-    container_name: azurite
-    ports:
-      - "10000:10000"  # Blob
-      - "10001:10001"  # Queue
-      - "10002:10002"  # Table
-    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --loose
-    healthcheck:
-      test: ["CMD", "nc", "-z", "127.0.0.1", "10000"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-    volumes:
-      - azurite-data:/data
-
-  # ---------------------------------------------------------------------------
-  # Setup - Create containers and queue
-  # ---------------------------------------------------------------------------
-  setup:
-    image: mcr.microsoft.com/azure-cli:latest
-    container_name: audio-preprocess-setup
-    depends_on:
-      azurite:
-        condition: service_healthy
-    environment:
-      - AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10001/devstoreaccount1;
-    command: |
-      bash -c "
-        echo 'Creating storage containers and queue...'
-        az storage container create --name audio-input --connection-string \"\$AZURE_STORAGE_CONNECTION_STRING\" || true
-        az storage container create --name audio-output --connection-string \"\$AZURE_STORAGE_CONNECTION_STRING\" || true
-        az storage queue create --name audio-processing-queue --connection-string \"\$AZURE_STORAGE_CONNECTION_STRING\" || true
-        
-        # Create input folder structure
-        echo 'placeholder' | az storage blob upload \
-          --container-name audio-input \
-          --name incoming/.placeholder \
-          --data @- \
-          --connection-string \"\$AZURE_STORAGE_CONNECTION_STRING\" || true
-        
-        echo 'Setup complete!'
-      "
-    restart: "no"
-
-volumes:
-  azurite-data:
 
 networks:
   default:
