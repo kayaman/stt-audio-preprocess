@@ -165,7 +165,7 @@ async def process_audio(file: UploadFile = File(...)):
         # Process the audio
         logger.info(f"Processing uploaded file: {file.filename} ({file_size_mb:.2f}MB)")
         
-        output_audio, stats = processor.process(audio_data)
+        output_audio, stats = processor.process(audio_data, file.filename or "uploaded_audio")
         
         # Update metrics
         duration = time.time() - start_time
