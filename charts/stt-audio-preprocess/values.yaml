@@ -65,6 +65,7 @@ autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 10
+  # At least one of targetCPUUtilizationPercentage or targetMemoryUtilizationPercentage must be set when autoscaling is enabled
   targetCPUUtilizationPercentage: 80
   targetMemoryUtilizationPercentage: 80
 
