@@ -4,63 +4,9 @@ Configuration management using Pydantic Settings.
 All configuration is loaded from environment variables with sensible defaults.
 """
 
-from typing import Optional, Literal
-from pydantic import Field, field_validator
+from typing import Literal
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class AzureSettings(BaseSettings):
-    """Azure Storage configuration."""
-    
-    model_config = SettingsConfigDict(
-        env_prefix="AZURE_",
-        env_file=".env",
-        extra="ignore"
-    )
-    
-    # Connection strings
-    storage_connection_string: str = Field(
-        default="",
-        description="Azure Storage connection string"
-    )
-    
-    # Alternatively, use managed identity
-    storage_account_name: str = Field(
-        default="",
-        description="Storage account name (for managed identity)"
-    )
-    
-    # Containers
-    container_input: str = Field(
-        default="audio-input",
-        description="Input blob container"
-    )
-    container_output: str = Field(
-        default="audio-output", 
-        description="Output blob container"
-    )
-    
-    # Folders (prefixes)
-    folder_input: str = Field(
-        default="incoming",
-        description="Input folder prefix"
-    )
-    folder_output: str = Field(
-        default="processed",
-        description="Output folder prefix"
-    )
-    
-    # Queue for event-driven processing
-    queue_name: str = Field(
-        default="audio-processing-queue",
-        description="Storage queue for blob events"
-    )
-    
-    # Delete source after processing
-    delete_source: bool = Field(
-        default=True,
-        description="Delete source blob after successful processing"
-    )
 
 
 class AudioSettings(BaseSettings):
@@ -259,18 +205,7 @@ class AppSettings(BaseSettings):
     )
     debug: bool = Field(default=False)
     
-    # Processing mode
-    processing_mode: Literal["queue", "polling", "manual"] = Field(
-        default="queue",
-        description="How to trigger processing: queue (recommended), polling, or manual (API only)"
-    )
-    polling_interval_seconds: int = Field(
-        default=10,
-        description="Interval for polling mode"
-    )
-    
     # Nested settings
-    azure: AzureSettings = Field(default_factory=AzureSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
     vad: VADSettings = Field(default_factory=VADSettings)
     silence: SilenceCompressionSettings = Field(default_factory=SilenceCompressionSettings)

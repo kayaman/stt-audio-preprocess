@@ -1,15 +1,8 @@
 """
 Main entry point for the audio preprocessing service.
-
-Supports multiple processing modes:
-- queue: Event-driven via Azure Storage Queue (recommended)
-- polling: Periodically scan input container
-- manual: API-only, no background processing
 """
 
-import asyncio
 import logging
-import signal
 import sys
 from contextlib import asynccontextmanager
 
@@ -18,8 +11,6 @@ from fastapi import FastAPI
 
 from .config import settings
 from .api import app as api_app
-from .queue_listener import queue_listener, polling_listener
-from .blob_handler import async_blob_handler
 
 # Configure logging
 logging.basicConfig(
@@ -39,40 +30,8 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"Environment: {settings.environment}")
-    logger.info(f"Processing mode: {settings.processing_mode}")
-    
-    # Start background processing task
-    background_task = None
-    
-    if settings.processing_mode == "queue":
-        logger.info("Starting queue listener...")
-        background_task = asyncio.create_task(
-            queue_listener.run(poll_interval=5)
-        )
-    elif settings.processing_mode == "polling":
-        logger.info("Starting polling listener...")
-        background_task = asyncio.create_task(
-            polling_listener.run()
-        )
-    else:
-        logger.info("Manual mode - no background processing")
     
     yield
-    
-    # Shutdown
-    logger.info("Shutting down...")
-    
-    if background_task:
-        queue_listener.stop()
-        polling_listener.stop()
-        background_task.cancel()
-        try:
-            await background_task
-        except asyncio.CancelledError:
-            pass
-    
-    await queue_listener.close()
-    await async_blob_handler.close()
     
     logger.info("Shutdown complete")
 
@@ -82,34 +41,16 @@ api_app.router.lifespan_context = lifespan
 
 
 # =============================================================================
-# Signal Handlers
-# =============================================================================
-def handle_shutdown(signum, frame):
-    """Handle shutdown signals gracefully."""
-    logger.info(f"Received signal {signum}, initiating shutdown...")
-    queue_listener.stop()
-    polling_listener.stop()
-    sys.exit(0)
-
-
-# =============================================================================
 # Main
 # =============================================================================
 def main():
     """Main entry point."""
-    # Register signal handlers
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    signal.signal(signal.SIGINT, handle_shutdown)
-    
     # Log configuration summary
     logger.info("=" * 60)
     logger.info("Audio Preprocessing Service")
     logger.info("=" * 60)
     logger.info(f"Version:         {settings.app_version}")
     logger.info(f"Environment:     {settings.environment}")
-    logger.info(f"Processing mode: {settings.processing_mode}")
-    logger.info(f"Input:           {settings.azure.container_input}/{settings.azure.folder_input}")
-    logger.info(f"Output:          {settings.azure.container_output}/{settings.azure.folder_output}")
     logger.info("-" * 60)
     logger.info(f"VAD:             {'Enabled' if settings.vad.enabled else 'Disabled'}")
     logger.info(f"Noise reduction: {'Enabled' if settings.noise.enabled else 'Disabled'}")

@@ -1,19 +1,20 @@
 """
-FastAPI application for health checks, metrics, and manual processing.
+FastAPI application for audio processing, health checks, and metrics.
 """
 
 import logging
-from typing import Optional, List
+import io
+import time
+from typing import Optional
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from .config import settings
-from .blob_handler import blob_handler, BlobInfo
-from .queue_listener import worker, queue_listener, polling_listener
+from .audio_processor import processor
 
 logger = logging.getLogger(__name__)
 
@@ -53,27 +54,7 @@ class HealthResponse(BaseModel):
     timestamp: str
     version: str
     environment: str
-    processing_mode: str
     config: dict
-
-
-class ProcessRequest(BaseModel):
-    container: str = Field(..., description="Source blob container")
-    blob_name: str = Field(..., description="Source blob name/path")
-
-
-class ProcessResponse(BaseModel):
-    success: bool
-    input_path: str
-    output_path: Optional[str] = None
-    stats: Optional[dict] = None
-    error: Optional[str] = None
-    duration_seconds: float
-
-
-class BlobListResponse(BaseModel):
-    count: int
-    blobs: List[dict]
 
 
 class StatsResponse(BaseModel):
@@ -97,6 +78,10 @@ app = FastAPI(
 # Track startup time
 _startup_time = datetime.now(timezone.utc)
 
+# Track processing stats
+_processed_count = 0
+_error_count = 0
+
 
 # =============================================================================
 # Health & Metrics Endpoints
@@ -109,26 +94,18 @@ async def health_check():
         timestamp=datetime.now(timezone.utc).isoformat(),
         version=settings.app_version,
         environment=settings.environment,
-        processing_mode=settings.processing_mode,
         config={
             "vad_enabled": settings.vad.enabled,
             "noise_reduction_enabled": settings.noise.enabled,
             "target_sample_rate": settings.audio.target_sample_rate,
-            "container_input": settings.azure.container_input,
-            "container_output": settings.azure.container_output,
         }
     )
 
 
 @app.get("/ready", tags=["Health"])
 async def readiness_check():
-    """Readiness check - verifies Azure Storage connectivity."""
-    try:
-        # Try to list containers (minimal operation)
-        _ = blob_handler.client.list_containers(max_results=1)
-        return {"status": "ready"}
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Not ready: {e}")
+    """Readiness check - service is always ready."""
+    return {"status": "ready"}
 
 
 @app.get("/metrics", tags=["Metrics"])
@@ -143,13 +120,14 @@ async def metrics():
 @app.get("/stats", response_model=StatsResponse, tags=["Metrics"])
 async def get_stats():
     """Get processing statistics."""
-    total = worker.processed_count + worker.error_count
-    success_rate = worker.processed_count / total if total > 0 else 0.0
+    global _processed_count, _error_count
+    total = _processed_count + _error_count
+    success_rate = _processed_count / total if total > 0 else 0.0
     uptime = (datetime.now(timezone.utc) - _startup_time).total_seconds()
     
     return StatsResponse(
-        processed_count=worker.processed_count,
-        error_count=worker.error_count,
+        processed_count=_processed_count,
+        error_count=_error_count,
         success_rate=round(success_rate, 3),
         uptime_seconds=round(uptime, 1)
     )
@@ -158,127 +136,69 @@ async def get_stats():
 # =============================================================================
 # Processing Endpoints
 # =============================================================================
-@app.post("/process", response_model=ProcessResponse, tags=["Processing"])
-async def process_blob(request: ProcessRequest):
+@app.post("/process", tags=["Processing"])
+async def process_audio(file: UploadFile = File(...)):
     """
-    Process a single blob manually.
+    Process an audio file and return the normalized WAV.
     
-    Use this for testing or reprocessing failed files.
+    Accepts audio file upload and returns processed 16-bit PCM WAV.
     """
-    blob_info = blob_handler.get_blob_info(request.container, request.blob_name)
+    global _processed_count, _error_count
     
-    if not blob_info:
-        raise HTTPException(status_code=404, detail="Blob not found")
+    start_time = time.time()
     
-    # Check extension
-    ext = f".{blob_info.extension}"
-    if ext not in settings.audio.supported_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported format: {ext}. Supported: {settings.audio.supported_extensions}"
+    try:
+        # Read the uploaded file into memory
+        audio_data = await file.read()
+        
+        # Check file size
+        file_size_mb = len(audio_data) / (1024 * 1024)
+        if file_size_mb > settings.processing.max_file_size_mb:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large: {file_size_mb:.1f}MB (max: {settings.processing.max_file_size_mb}MB)"
+            )
+        
+        # Update metrics
+        FILE_SIZE_HISTOGRAM.observe(len(audio_data))
+        
+        # Process the audio
+        logger.info(f"Processing uploaded file: {file.filename} ({file_size_mb:.2f}MB)")
+        
+        output_audio, stats = processor.process(audio_data)
+        
+        # Update metrics
+        duration = time.time() - start_time
+        PROCESSING_DURATION.observe(duration)
+        PROCESSED_COUNTER.labels(status="success").inc()
+        COMPRESSION_RATIO.observe(1 - stats.compression_ratio)
+        _processed_count += 1
+        
+        logger.info(
+            f"Processed {file.filename}: "
+            f"{stats.original_duration_ms}ms -> {stats.final_duration_ms}ms "
+            f"({stats.compression_ratio:.1%} reduction) in {duration:.2f}s"
         )
-    
-    # Process
-    result = worker.process_blob(blob_info)
-    
-    # Update metrics
-    PROCESSED_COUNTER.labels(status="success" if result.success else "error").inc()
-    PROCESSING_DURATION.observe(result.duration_seconds)
-    
-    if result.stats:
-        FILE_SIZE_HISTOGRAM.observe(result.stats.original_duration_ms * 16 * 2)  # Approximate bytes
-        COMPRESSION_RATIO.observe(1 - result.stats.compression_ratio)
-    
-    return ProcessResponse(
-        success=result.success,
-        input_path=result.input_path,
-        output_path=result.output_path,
-        stats=result.stats.to_dict() if result.stats else None,
-        error=result.error,
-        duration_seconds=result.duration_seconds
-    )
-
-
-@app.post("/process/batch", tags=["Processing"])
-async def process_batch(
-    background_tasks: BackgroundTasks,
-    container: str = Query(default=None, description="Override input container"),
-    prefix: str = Query(default=None, description="Override input prefix"),
-    limit: int = Query(default=100, le=1000, description="Maximum files to process")
-):
-    """
-    Process multiple blobs in the background.
-    
-    Useful for bulk reprocessing.
-    """
-    container = container or settings.azure.container_input
-    prefix = prefix or settings.azure.folder_input
-    
-    # List blobs
-    blobs = blob_handler.list_blobs(
-        container,
-        prefix=prefix,
-        extensions=settings.audio.supported_extensions
-    )[:limit]
-    
-    if not blobs:
-        return {"message": "No files to process", "count": 0}
-    
-    # Add background task
-    def process_all():
-        for blob_info in blobs:
-            result = worker.process_blob(blob_info)
-            PROCESSED_COUNTER.labels(status="success" if result.success else "error").inc()
-            PROCESSING_DURATION.observe(result.duration_seconds)
-    
-    background_tasks.add_task(process_all)
-    
-    return {
-        "message": f"Processing {len(blobs)} files in background",
-        "count": len(blobs),
-        "files": [b.name for b in blobs[:10]]  # Show first 10
-    }
-
-
-@app.get("/blobs", response_model=BlobListResponse, tags=["Storage"])
-async def list_input_blobs(
-    container: str = Query(default=None, description="Container name"),
-    prefix: str = Query(default=None, description="Blob prefix"),
-    limit: int = Query(default=100, le=1000, description="Maximum results")
-):
-    """List blobs in the input container."""
-    container = container or settings.azure.container_input
-    prefix = prefix or settings.azure.folder_input
-    
-    blobs = blob_handler.list_blobs(
-        container,
-        prefix=prefix,
-        extensions=settings.audio.supported_extensions
-    )[:limit]
-    
-    return BlobListResponse(
-        count=len(blobs),
-        blobs=[
-            {
-                "name": b.name,
-                "size": b.size,
-                "content_type": b.content_type,
-                "last_modified": b.last_modified.isoformat() if b.last_modified else None
+        
+        # Return the processed audio as a streaming response
+        return StreamingResponse(
+            io.BytesIO(output_audio),
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f'attachment; filename="processed_{file.filename}.wav"',
+                "X-Processing-Duration-Ms": str(int(duration * 1000)),
+                "X-Original-Duration-Ms": str(stats.original_duration_ms),
+                "X-Final-Duration-Ms": str(stats.final_duration_ms),
+                "X-Compression-Ratio": f"{stats.compression_ratio:.3f}",
             }
-            for b in blobs
-        ]
-    )
-
-
-# =============================================================================
-# Control Endpoints
-# =============================================================================
-@app.post("/control/pause", tags=["Control"])
-async def pause_processing():
-    """Pause background processing."""
-    queue_listener.stop()
-    polling_listener.stop()
-    return {"status": "paused"}
+        )
+        
+    except Exception as e:
+        duration = time.time() - start_time
+        PROCESSED_COUNTER.labels(status="error").inc()
+        _error_count += 1
+        logger.error(f"Error processing {file.filename}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
 @app.get("/config", tags=["Config"])
@@ -288,7 +208,6 @@ async def get_config():
         "app_name": settings.app_name,
         "app_version": settings.app_version,
         "environment": settings.environment,
-        "processing_mode": settings.processing_mode,
         "audio": {
             "target_sample_rate": settings.audio.target_sample_rate,
             "target_channels": settings.audio.target_channels,
